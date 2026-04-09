@@ -81,31 +81,43 @@
     "description": "启用输入审查",
     "type": "bool",
     "default": true,
-    "hint": "开启后将对用户输入的提示词进行审查"
+    "hint": "开启后将对用户输入的提示词进行审查（文本审查）"
   },
   "input_censorship_use_llm": {
     "description": "输入审查使用LLM",
     "type": "bool",
     "default": true,
-    "hint": "输入审查时是否使用LLM进行智能判断"
+    "hint": "输入审查时是否使用LLM对提示词进行智能判断"
   },
   "enable_output_censorship": {
     "description": "启用输出审查",
     "type": "bool",
     "default": false,
-    "hint": "开启后将对生成的图片进行审查，使用tagger获取图片标签并进行安全检查"
+    "hint": "开启后将对生成的图片进行审查"
   },
   "output_censorship_use_llm": {
-    "description": "输出审查使用LLM",
+    "description": "输出审查使用多模态LLM审查图片",
     "type": "bool",
     "default": true,
-    "hint": "输出审查时是否使用LLM进行智能判断"
+    "hint": "输出审查时是否使用多模态LLM直接审查图片内容"
+  },
+  "output_censorship_use_tagger": {
+    "description": "输出审查使用Tagger",
+    "type": "bool",
+    "default": true,
+    "hint": "输出审查时是否使用Tagger获取图片标签并进行关键词审查（无LLM参与）"
   },
   "censorship_prompt": {
-    "description": "审查系统提示词",
+    "description": "输入审查系统提示词",
     "type": "string",
     "default": "你是一个内容安全审核员，必须严格遵循\"疑罪从无\"的原则。你需要判断以下内容（Danbooru标签）是否包含R18级别的完全裸露内容。\\n\\n关键概念（必须严格执行）：\\n乳头和乳晕是两个完全不同的部位。乳晕（areola）是乳头周围的色素区域，乳头（nipple）是乳房顶端的小突起。乳晕可见不代表乳头可见。标签中出现\"areola\"时，仅表示乳晕可见，这不属于R18内容，不违规。\\n\\n同样，乳房（breasts）、乳沟（cleavage）都是描述乳房这个器官，不是描述乳头，不违规。\\n\\n违规的唯一情况：\\n标签的语义明确表达\"乳头本身可见\"、\"生殖器官本身可见\"或\"肛门本身可见\"。\\n\\n判定逻辑：\\n- 如果标签表达的是\"乳头可见\"→违规\\n- 如果标签表达的是\"乳晕可见\"→不违规\\n- 如果标签表达的是\"乳房存在/乳沟\"→不违规\\n- 如果标签表达的是\"生殖器官可见\"→违规\\n- 如果标签表达的是\"肛门可见\"→违规\\n- 其他所有情况→不违规\\n\\n只回复 yes 或 no，不要附加任何其他任何内容。\\n违规回复 yes，不违规回复 no。",
-    "hint": "AI 审查时使用的系统提示词"
+    "hint": "输入审查（文本审查）时使用的系统提示词，仅用于审查用户输入的提示词"
+  },
+  "output_censorship_prompt": {
+    "description": "输出审查系统提示词（多模态LLM）",
+    "type": "string",
+    "default": "你是一个内容安全审核员，必须严格遵循\"疑罪从无\"的原则。你需要判断这张图片是否包含R18级别的完全裸露内容。\\n\\n关键概念（必须严格执行）：\\n乳头和乳晕是两个完全不同的部位。乳晕是乳头周围的色素区域，乳头是乳房顶端的小突起。乳晕可见不代表乳头可见。\\n\\n同样，乳房、乳沟都是描述乳房这个器官，不是描述乳头，不违规。\\n\\n违规的唯一情况：\\n图片中明确可见乳头本身、生殖器官本身或肛门本身。\\n\\n判定逻辑：\\n- 如果图片中乳头可见→违规\\n- 如果图片中乳晕可见→不违规\\n- 如果图片中乳房/乳沟可见→不违规\\n- 如果图片中生殖器官可见→违规\\n- 如果图片中肛门可见→违规\\n- 其他所有情况→不违规\\n\\n只回复 yes 或 no，不要附加任何其他任何内容。\\n违规回复 yes，不违规回复 no。",
+    "hint": "多模态LLM审查图片时使用的系统提示词，用于输出审查和图生图输入审查"
   },
   "llm_provider_id": {
     "description": "LLM 提供商",
@@ -174,16 +186,34 @@
     "default": "15",
     "hint": "图生图工作流中LoadImage节点的编号"
   },
+  "enable_img2img_input_censorship": {
+    "description": "启用图生图输入审查",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后将对图生图用户输入的图片进行审查（通过多模态LLM审查图片）"
+  },
+  "img2img_input_censorship_use_llm": {
+    "description": "图生图输入审查使用多模态LLM",
+    "type": "bool",
+    "default": true,
+    "hint": "图生图输入审查时是否使用多模态LLM审查用户输入的图片"
+  },
   "enable_img2img_output_censorship": {
     "description": "启用图生图输出审查",
     "type": "bool",
     "default": false,
-    "hint": "开启后将对图生图生成的图片进行审查，使用tagger获取图片标签并进行安全检查"
+    "hint": "开启后将对图生图生成的图片进行审查"
   },
   "img2img_output_censorship_use_llm": {
-    "description": "图生图输出审查使用LLM",
+    "description": "图生图输出审查使用多模态LLM",
     "type": "bool",
     "default": true,
-    "hint": "图生图输出审查时是否使用LLM进行智能判断"
+    "hint": "图生图输出审查时是否使用多模态LLM直接审查图片内容"
+  },
+  "img2img_output_censorship_use_tagger": {
+    "description": "图生图输出审查使用Tagger",
+    "type": "bool",
+    "default": true,
+    "hint": "图生图输出审查时是否使用Tagger获取图片标签并进行关键词审查（无LLM参与）"
   }
 }

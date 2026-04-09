@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import shutil
@@ -10,6 +11,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Reply
 from astrbot.api.star import Context, Star, register
+from astrbot.core.agent.message import UserMessageSegment, TextPart, ImageURLPart
 
 from .comfyui_api import ComfyUIAPI
 from .image_to_image import ImageToImage
@@ -124,10 +126,17 @@ class ComfyUIHub(Star):
         # 输出图片审查设置
         self.enable_output_censorship = config.get("enable_output_censorship", False)
         self.output_censorship_use_llm = config.get("output_censorship_use_llm", True)
+        self.output_censorship_use_tagger = config.get("output_censorship_use_tagger", True)
+        self.output_censorship_prompt = config.get("output_censorship_prompt", "")
+
+        # 图生图输入审查设置（审查用户输入的图片）
+        self.enable_img2img_input_censorship = config.get("enable_img2img_input_censorship", False)
+        self.img2img_input_censorship_use_llm = config.get("img2img_input_censorship_use_llm", True)
 
         # 图生图输出审查设置
         self.enable_img2img_output_censorship = config.get("enable_img2img_output_censorship", False)
         self.img2img_output_censorship_use_llm = config.get("img2img_output_censorship_use_llm", True)
+        self.img2img_output_censorship_use_tagger = config.get("img2img_output_censorship_use_tagger", True)
 
     def _load_block_data(self):
         self.block_tags = set()
@@ -306,13 +315,10 @@ class ComfyUIHub(Star):
         except Exception as e:
             logger.error(f"Error saving block data: {e}")
 
-    async def _check_safety_with_llm(self, event: AstrMessageEvent, text: str, is_output_check: bool = False) -> tuple:
-        """使用 AstrBot 内置 LLM 检查文本安全"""
+    async def _check_safety_with_llm(self, event: AstrMessageEvent, text: str) -> tuple:
+        """使用 AstrBot 内置 LLM 检查文本安全（用于输入审查）"""
         try:
-            if is_output_check and not self.output_censorship_use_llm:
-                return True, "LLM Disabled"
-
-            if not is_output_check and not self.input_censorship_use_llm:
+            if not self.input_censorship_use_llm:
                 return True, "LLM Disabled"
 
             provider_id = self.llm_provider_id
@@ -335,8 +341,77 @@ class ComfyUIHub(Star):
 
             result = llm_resp.completion_text.strip()
 
-            check_type = "输出" if is_output_check else "输入"
-            logger.info(f"[{check_type}审查] LLM原始响应: {result}")
+            logger.info(f"[输入审查] LLM原始响应: {result}")
+
+            is_violation = bool(
+                re.search(r'\byes\b', result, re.IGNORECASE) or
+                re.search(r'\bviolation\b', result, re.IGNORECASE) or
+                re.search(r'\bnsfw\b', result, re.IGNORECASE) or
+                re.search(r'违规', result) or
+                re.search(r'不安全', result) or
+                re.search(r'\b是\b', result)
+            )
+
+            logger.info(f"[输入审查] 判定结果: {'违规' if is_violation else '通过'}")
+
+            if is_violation:
+                return False, "AI审查拦截"
+
+            return True, ""
+
+        except Exception as e:
+            logger.error(f"AstrBot LLM 文本审查失败: {e}")
+            return True, f"审查出错: {e}"
+
+    async def _check_image_safety_with_llm(self, event: AstrMessageEvent, image_data: bytes, is_img2img_input: bool = False) -> tuple:
+        """使用多模态 LLM 检查图片安全（用于输出审查和图生图输入审查）"""
+        try:
+            # 确定是否使用 LLM
+            if is_img2img_input:
+                if not self.img2img_input_censorship_use_llm:
+                    return True, "LLM Disabled"
+            else:
+                if not self.output_censorship_use_llm:
+                    return True, "LLM Disabled"
+
+            provider_id = self.llm_provider_id
+            if not provider_id:
+                umo = event.unified_msg_origin
+                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                if not provider_id:
+                    return True, "No Provider"
+
+            system_prompt = self.output_censorship_prompt
+
+            # 将图片转为 base64 并构建多模态消息
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            # 检测图片格式
+            try:
+                img = PILImage.open(BytesIO(image_data))
+                mime_type = f"image/{img.format.lower()}"
+            except Exception:
+                mime_type = "image/png"
+
+            image_url = f"data:{mime_type};base64,{image_base64}"
+
+            check_type = "图生图输入" if is_img2img_input else "输出"
+            user_msg = UserMessageSegment(content=[
+                TextPart(text=f"请审查这张图片是否包含违规内容。"),
+                ImageURLPart(image_url=ImageURLPart.ImageURL(url=image_url))
+            ])
+
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                contexts=[user_msg],
+                system_prompt=system_prompt
+            )
+
+            if not llm_resp or not llm_resp.completion_text:
+                return True, "No Response"
+
+            result = llm_resp.completion_text.strip()
+
+            logger.info(f"[{check_type}审查] 多模态LLM原始响应: {result}")
 
             is_violation = bool(
                 re.search(r'\byes\b', result, re.IGNORECASE) or
@@ -355,12 +430,16 @@ class ComfyUIHub(Star):
             return True, ""
 
         except Exception as e:
-            logger.error(f"AstrBot LLM 审查失败: {e}")
+            logger.error(f"AstrBot 多模态 LLM 图片审查失败: {e}")
             return True, f"审查出错: {e}"
 
     async def _check_output_censorship(self, event: AstrMessageEvent, image_data: bytes, check_type: str = "文生图") -> tuple[bool, str]:
         """
         统一的输出图片审查函数
+
+        支持两种审查方式（可同时启用）：
+        1. Tagger 审查：使用 tagger 获取图片标签，再进行关键词检查和 LLM 文本审查
+        2. 多模态 LLM 审查：直接将图片发送给多模态 LLM 进行审查
 
         Args:
             event: 事件对象
@@ -371,10 +450,6 @@ class ComfyUIHub(Star):
             (True, ""): 审查通过
             (False, reason): 审查不通过，reason 为失败原因
         """
-        if not self.img2txt:
-            logger.info(f"[{check_type}] Tagger 不可用，跳过输出审查")
-            return True, ""
-
         group_id = event.get_group_id()
         is_censorship_enabled = group_id and group_id in self.censored_groups
 
@@ -382,17 +457,21 @@ class ComfyUIHub(Star):
         should_bypass_censorship = is_admin and self.admin_bypass_censorship
 
         # 确定启用哪个开关
-        # 文生图使用 enable_output_censorship
-        # 图生图使用 enable_img2img_output_censorship
         enable_output_censorship = (
             self.enable_output_censorship if check_type == "文生图"
             else self.enable_img2img_output_censorship
         )
 
-        # 确定使用哪个 LLM 开关
+        # 确定是否使用多模态 LLM 审查
         use_llm = (
             self.output_censorship_use_llm if check_type == "文生图"
             else self.img2img_output_censorship_use_llm
+        )
+
+        # 确定是否使用 tagger 审查
+        use_tagger = (
+            self.output_censorship_use_tagger if check_type == "文生图"
+            else self.img2img_output_censorship_use_tagger
         )
 
         # 检查是否开启审查（仅针对群聊且在开启列表中）
@@ -400,29 +479,63 @@ class ComfyUIHub(Star):
             logger.info(f"[{check_type}] 未开启输出审查或已绕过")
             return True, ""
 
-        # 使用 tagger 获取图片标签
-        tags_text = await self.img2txt.generate(image_data)
+        # 审查方式1: Tagger 审查（tagger获取标签 → 关键词检查，无LLM参与）
+        if use_tagger and self.img2txt:
+            tags_text = await self.img2txt.generate(image_data)
 
-        if not tags_text:
-            logger.info(f"[{check_type}] Tagger 未返回标签，跳过审查")
-            return True, ""
+            if tags_text:
+                logger.info(f"[{check_type}] 输出图片标签: {tags_text}")
 
-        logger.info(f"[{check_type}] 输出图片标签: {tags_text}")
+                # 关键词审查
+                is_safe_simple, reason_simple = self._check_simple_tags(tags_text)
+                if not is_safe_simple:
+                    logger.info(f"[{check_type}] 输出图片关键词审查拦截: {reason_simple}")
+                    return False, f"⚠️ 生成的图片{reason_simple}，已被审查系统拒绝。"
+            else:
+                logger.info(f"[{check_type}] Tagger 未返回标签，跳过 tagger 审查")
+        elif use_tagger and not self.img2txt:
+            logger.info(f"[{check_type}] Tagger 不可用，跳过 tagger 审查")
 
-        # 检查方式1: 使用简单关键词审查（始终执行）
-        is_safe_simple, reason_simple = self._check_simple_tags(tags_text)
-        if not is_safe_simple:
-            logger.info(f"[{check_type}] 输出图片关键词审查拦截: {reason_simple}")
-            return False, f"⚠️ 生成的图片{reason_simple}，已被审查系统拒绝。"
-
-        # 检查方式2: 使用 LLM 审查
+        # 审查方式2: 多模态 LLM 直接审查图片
         if use_llm:
-            is_safe, reason = await self._check_safety_with_llm(event, tags_text, is_output_check=True)
+            is_safe, reason = await self._check_image_safety_with_llm(event, image_data, is_img2img_input=False)
             if not is_safe:
-                logger.info(f"[{check_type}] 输出图片 LLM 审查拦截")
+                logger.info(f"[{check_type}] 输出图片多模态LLM审查拦截")
                 return False, "⚠️ 生成的图片包含敏感内容，已被AI审查系统拒绝。"
 
         logger.info(f"[{check_type}] 输出图片审查通过")
+        return True, ""
+
+    async def _check_img2img_input_censorship(self, event: AstrMessageEvent, image_data: bytes) -> tuple[bool, str]:
+        """
+        图生图输入图片审查函数（通过多模态LLM审查用户输入的图片）
+
+        Args:
+            event: 事件对象
+            image_data: 用户输入的图片数据
+
+        Returns:
+            (True, ""): 审查通过
+            (False, reason): 审查不通过，reason 为失败原因
+        """
+        group_id = event.get_group_id()
+        is_censorship_enabled = group_id and group_id in self.censored_groups
+
+        is_admin = event.is_admin()
+        should_bypass_censorship = is_admin and self.admin_bypass_censorship
+
+        if not (is_censorship_enabled and not should_bypass_censorship and self.enable_img2img_input_censorship):
+            logger.info("[图生图] 未开启输入图片审查或已绕过")
+            return True, ""
+
+        # 使用多模态 LLM 审查输入图片
+        if self.img2img_input_censorship_use_llm:
+            is_safe, reason = await self._check_image_safety_with_llm(event, image_data, is_img2img_input=True)
+            if not is_safe:
+                logger.info("[图生图] 输入图片多模态LLM审查拦截")
+                return False, "⚠️ 您输入的图片包含敏感内容，已被AI审查系统拒绝。"
+
+        logger.info("[图生图] 输入图片审查通过")
         return True, ""
 
     def _parse_params(self, text: str) -> tuple:
@@ -977,6 +1090,55 @@ class ComfyUIHub(Star):
             return
 
         logger.info(f"成功获取图片数据，大小: {len(image_data)} 字节")
+
+        # 图生图输入图片审查
+        is_safe, message = await self._check_img2img_input_censorship(event, image_data)
+        if not is_safe:
+            yield event.plain_result(message)
+            return
+
+        # 输入文本审查（与文生图相同）
+        user_id = event.get_sender_id()
+        current_time = time.time()
+
+        # 检查是否在封禁期
+        if user_id in self.blocked_users:
+            expire_time = self.blocked_users[user_id]
+            if current_time < expire_time:
+                remaining = int(expire_time - current_time)
+                yield event.plain_result(f"由于触发违规词，您已被禁止使用绘图功能。剩余时间: {remaining} 秒。")
+                return
+            else:
+                del self.blocked_users[user_id]
+                self._save_block_data()
+
+        group_id = event.get_group_id()
+        is_censorship_enabled = group_id and group_id in self.censored_groups
+        is_admin = event.is_admin()
+        should_bypass_censorship = is_admin and self.admin_bypass_censorship
+
+        if is_censorship_enabled and not should_bypass_censorship and self.enable_input_censorship:
+            # 本地 Block Tag 检查
+            for tag in self.block_tags:
+                if tag.lower() in positive.lower():
+                    self.blocked_users[user_id] = current_time + 120
+                    self._save_block_data()
+                    yield event.plain_result(f"⚠️ 违规：检测到敏感词 '{tag}'。您将被禁服务 2 分钟。")
+                    return
+
+            # LLM 文本审查
+            if self.input_censorship_use_llm:
+                is_safe, reason = await self._check_safety_with_llm(event, positive)
+                if not is_safe:
+                    self.blocked_users[user_id] = current_time + 120
+                    self._save_block_data()
+                    logger.info(f"图生图输入文本LLM审查拦截")
+                    yield event.plain_result(f"⚠️ 您的绘图申请包含敏感内容，已被AI审查系统拒绝。您将被禁服务 2 分钟。")
+                    return
+
+            # 自动添加 safe prompt
+            if "sfw" not in positive.lower() and "safe" not in positive.lower():
+                positive += ", sfw, safe for work"
 
         # 发送"正在生成图片..."消息
         await self._send_text_message(event, "正在生成图片...")
