@@ -8,17 +8,17 @@ from pathlib import Path
 from PIL import Image as PILImage
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.message_components import Node, Image, Reply
+from astrbot.api.message_components import Reply
 from astrbot.api.star import Context, Star, register
 
 from .comfyui_api import ComfyUIAPI
-from .image_to_text import ImageToText
 from .image_to_image import ImageToImage
+from .image_to_text import ImageToText
 from .text_to_image import TextToImage
 
 
 @register("astrbot_plugin_comfyui_hub", "ChooseC", "为 AstrBot 提供 ComfyUI 调用能力的插件，计划支持 ComfyUI 全功能。",
-          "1.0.10", "https://github.com/ReallyChooseC/astrbot_plugin_comfyui_hub")
+          "1.1.0", "https://github.com/ReallyChooseC/astrbot_plugin_comfyui_hub")
 class ComfyUIHub(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
