@@ -73,7 +73,7 @@ class ImageToImage:
             logger.error(f"[ComfyUI] 动图检测/处理失败: {e}")
             return None
 
-    async def generate(self, image_data_list: list, prompt: str, negative: str = "") -> Optional[bytes]:
+    async def generate(self, image_data_list: list, prompt: str, negative: str = "", max_wait: float = 300.0, on_wait_callback=None, on_submitted_callback=None) -> Optional[bytes]:
         """生成图片
         
         Args:
@@ -169,16 +169,10 @@ class ImageToImage:
                     inputs["noise_seed"] = base_seed + offset
                     offset += 1
 
-        # 提交任务
-        prompt_id = await self.api.queue_prompt(workflow)
-        if not prompt_id:
-            logger.error("[ComfyUI] 提交图生图任务失败")
-            return None
-
-        # 等待结果
-        result = await self.api.wait_result(prompt_id)
+        # 提交任务并等待结果
+        result = await self.api.queue_and_wait_image(workflow, max_wait=max_wait, on_wait_callback=on_wait_callback, on_submitted_callback=on_submitted_callback)
 
         if not result:
-            logger.error("[ComfyUI] 图生图等待结果超时或失败")
+            logger.error("[ComfyUI] 图生图生成失败或等待结果超时")
 
         return result

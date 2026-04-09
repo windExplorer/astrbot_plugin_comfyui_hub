@@ -796,10 +796,24 @@ class ComfyUIHub(Star):
             yield event.plain_result("请输入正面提示词")
             return
 
-        # 发送"正在生成图片..."消息
-        await self._send_text_message(event, "正在生成图片...")
+        # 队列等待回调：每隔一分钟提示用户等待状态
+        async def on_queue_wait(running_count: int, pending_count: int, waited: float):
+            await self._send_text_message(
+                event,
+                f"仍在排队等待中...（前面还有 {pending_count} 个任务）"
+            )
 
-        image_data = await self.txt2img.generate(positive, negative, width, height, scale)
+        # 提交成功回调：显示队列位置
+        async def on_submitted(prompt_id: str, queue_position: int, tasks_ahead: int):
+            if queue_position > 0:
+                await self._send_text_message(
+                    event,
+                    f"已提交，队列第 {queue_position} 位（前方 {tasks_ahead} 个任务）"
+                )
+            else:
+                await self._send_text_message(event, "正在生成图片...")
+
+        image_data = await self.txt2img.generate(positive, negative, width, height, scale, on_wait_callback=on_queue_wait, on_submitted_callback=on_submitted)
 
         if image_data:
             # 输出图片审查
@@ -995,11 +1009,25 @@ class ComfyUIHub(Star):
 
         logger.info(f"成功获取图片数据，大小: {len(image_data)} 字节")
 
-        # 发送"正在识别图片..."消息
-        await self._send_text_message(event, "正在识别图片标签...")
+        # 队列等待回调：每隔一分钟提示用户等待状态
+        async def on_queue_wait(running_count: int, pending_count: int, waited: float):
+            await self._send_text_message(
+                event,
+                f"仍在排队等待中...（前面还有 {pending_count} 个任务）"
+            )
+
+        # 提交成功回调：显示队列位置
+        async def on_submitted(prompt_id: str, queue_position: int, tasks_ahead: int):
+            if queue_position > 0:
+                await self._send_text_message(
+                    event,
+                    f"已提交，队列第 {queue_position} 位（前方 {tasks_ahead} 个任务）"
+                )
+            else:
+                await self._send_text_message(event, "正在识别图片标签...")
 
         # 生成标签
-        result_text = await self.img2txt.generate(image_data)
+        result_text = await self.img2txt.generate(image_data, on_wait_callback=on_queue_wait, on_submitted_callback=on_submitted)
         logger.info(f"标签识别结果: {result_text}")
 
         if result_text:
@@ -1144,11 +1172,25 @@ class ComfyUIHub(Star):
             if "sfw" not in positive.lower() and "safe" not in positive.lower():
                 positive += ", sfw, safe for work"
 
-        # 发送"正在生成图片..."消息
-        await self._send_text_message(event, "正在生成图片...")
+        # 队列等待回调：每隔一分钟提示用户等待状态
+        async def on_queue_wait(running_count: int, pending_count: int, waited: float):
+            await self._send_text_message(
+                event,
+                f"仍在排队等待中...（前面还有 {pending_count} 个任务）"
+            )
+
+        # 提交成功回调：显示队列位置
+        async def on_submitted(prompt_id: str, queue_position: int, tasks_ahead: int):
+            if queue_position > 0:
+                await self._send_text_message(
+                    event,
+                    f"已提交，队列第 {queue_position} 位（前方 {tasks_ahead} 个任务）"
+                )
+            else:
+                await self._send_text_message(event, "正在生成图片...")
 
         # 生成图片
-        result_image = await self.img2img.generate(image_data_list, positive, negative)
+        result_image = await self.img2img.generate(image_data_list, positive, negative, on_wait_callback=on_queue_wait, on_submitted_callback=on_submitted)
 
         if result_image:
             # 图生图输出图片审查

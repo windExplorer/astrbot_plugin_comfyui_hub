@@ -21,7 +21,7 @@ class ImageToText:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
-    async def generate(self, image_data: bytes) -> Optional[str]:
+    async def generate(self, image_data: bytes, max_wait: float = 300.0, on_wait_callback=None, on_submitted_callback=None) -> Optional[str]:
         """生成图片标签文本"""
         workflow = json.loads(json.dumps(self.workflow))
 
@@ -54,16 +54,10 @@ class ImageToText:
             logger.error("[ComfyUI] 未找到 LoadImage 节点")
             return None
 
-        # 提交任务
-        prompt_id = await self.api.queue_prompt(workflow)
-        if not prompt_id:
-            logger.error("[ComfyUI] 提交tagger任务失败")
-            return None
-
-        # 等待结果
-        result = await self.api.wait_text_result(prompt_id, self.output_node)
+        # 提交任务并等待结果
+        result = await self.api.queue_and_wait_text(workflow, self.output_node, max_wait=max_wait, on_wait_callback=on_wait_callback, on_submitted_callback=on_submitted_callback)
 
         if not result:
-            logger.error("[ComfyUI] tagger等待结果超时或失败")
+            logger.error("[ComfyUI] tagger生成失败或等待结果超时")
 
         return result
