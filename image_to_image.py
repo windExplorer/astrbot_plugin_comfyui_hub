@@ -73,6 +73,41 @@ class ImageToImage:
             logger.error(f"[ComfyUI] 动图检测/处理失败: {e}")
             return None
 
+    @staticmethod
+    def _find_companion_nodes(workflow: dict, source_node_ids: set) -> set:
+        """查找与未分配节点"一体化"的同伴节点
+
+        同伴节点是指所有节点链接输入（非简单值输入）都来源于 source_node_ids
+        或其他同伴节点的节点，例如 LoadImage 的配套缩放节点。
+        这类节点离开源节点后无意义，应一并移除。
+
+        不同于递归移除所有引用节点，此方法只移除"完全依赖"的同伴节点，
+        不会移除仍具备其他独立输入的关键节点（如提示词节点、KSampler 等）。
+        """
+        all_to_remove = set(source_node_ids)
+        changed = True
+        while changed:
+            changed = False
+            for nid, ndata in workflow.items():
+                if nid in all_to_remove:
+                    continue
+                if not isinstance(ndata, dict):
+                    continue
+                inputs = ndata.get("inputs", {})
+                # 收集此节点的所有链接输入（引用其他节点的输入）
+                link_refs = []
+                for value in inputs.values():
+                    if isinstance(value, list) and len(value) >= 2:
+                        link_refs.append(str(value[0]))
+                # 如果没有任何链接输入，则不依赖任何节点，跳过
+                if not link_refs:
+                    continue
+                # 如果所有链接输入都指向已标记移除的节点，则此节点也是同伴节点
+                if all(ref in all_to_remove for ref in link_refs):
+                    all_to_remove.add(nid)
+                    changed = True
+        return all_to_remove
+
     async def generate(self, image_data_list: list, prompt: str, negative: str = "", max_wait: float = 300.0, on_wait_callback=None, on_submitted_callback=None) -> Optional[bytes]:
         """生成图片
         
@@ -139,6 +174,36 @@ class ImageToImage:
 
         if assigned_count < len(uploaded_filenames):
             logger.warning(f"[ComfyUI] 上传了 {len(uploaded_filenames)} 张图片，但只有 {assigned_count} 个 LoadImage 节点可用")
+
+        # 移除未分配图片的 LoadImage 节点及其依赖节点
+        unassigned_load_nodes = set()
+        for nid, ndata in load_image_nodes:
+            image_val = ndata.get("inputs", {}).get("image", "")
+            if not image_val or (isinstance(image_val, str) and not image_val.strip()):
+                unassigned_load_nodes.add(nid)
+
+        if unassigned_load_nodes:
+            # 查找与未分配 LoadImage 节点"一体化"的同伴节点（如配套缩放节点）
+            all_to_remove = self._find_companion_nodes(workflow, unassigned_load_nodes)
+            # 清理保留节点中对已移除节点的引用（如提示词节点中的 image2/image3 字段）
+            for nid, ndata in list(workflow.items()):
+                if nid in all_to_remove:
+                    continue
+                if not isinstance(ndata, dict):
+                    continue
+                inputs = ndata.get("inputs", {})
+                keys_to_remove = []
+                for key, value in inputs.items():
+                    if isinstance(value, list) and len(value) >= 2:
+                        ref_id = str(value[0])
+                        if ref_id in all_to_remove:
+                            keys_to_remove.append(key)
+                for key in keys_to_remove:
+                    del inputs[key]
+            # 从工作流中移除这些节点
+            for nid in all_to_remove:
+                del workflow[nid]
+            logger.info(f"[ComfyUI] 移除未分配图片的节点: {unassigned_load_nodes}，及其同伴节点: {all_to_remove - unassigned_load_nodes}")
 
         # 设置正面提示词
         pos_node = workflow.get(self.positive_node)
