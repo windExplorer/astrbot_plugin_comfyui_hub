@@ -219,6 +219,100 @@ class ComfyUIAPI:
 
         return result
 
+    async def queue_and_wait_video(self, workflow: dict, max_wait: float = 300.0, on_wait_callback=None, on_submitted_callback=None) -> Optional[bytes]:
+        """提交工作流并等待视频结果（带队列缓冲）
+
+        Args:
+            workflow: 工作流字典
+            max_wait: 队列最大等待秒数，超时后直接提交
+            on_wait_callback: 队列等待回调
+            on_submitted_callback: 提交成功后的回调
+        """
+        from astrbot.api import logger
+
+        async with self._submit_lock:
+            queue_waited = await self._wait_queue_idle(max_wait=max_wait, on_wait_callback=on_wait_callback)
+
+            extra_timeout = 0
+            if queue_waited >= max_wait:
+                info = await self.get_queue_info()
+                pending_count = len(info.get("queue_pending", []))
+                extra_timeout = max(120, pending_count * 60)
+                logger.info(f"[ComfyUI] 强制提交，额外增加结果等待超时 {extra_timeout}s（前方排队: {pending_count}）")
+
+            logger.info("[ComfyUI] 开始提交视频任务")
+            prompt_id = await self._submit_prompt(workflow)
+            if not prompt_id:
+                logger.error("[ComfyUI] 提交任务失败")
+                return None
+
+            await asyncio.sleep(1)
+            queue_position, tasks_ahead, queue_extra = await self._calc_queue_timeout(prompt_id)
+            extra_timeout = max(extra_timeout, queue_extra)
+
+            if on_submitted_callback:
+                try:
+                    await on_submitted_callback(prompt_id, queue_position, tasks_ahead)
+                except Exception as e:
+                    logger.error(f"[ComfyUI] 提交回调异常: {e}")
+
+        logger.info(f"[ComfyUI] 任务 {prompt_id} 已提交，等待视频结果...（总超时: {self.timeout + extra_timeout}s）")
+        result = await self.wait_video_result(prompt_id, extra_timeout=extra_timeout)
+
+        if result:
+            logger.info(f"[ComfyUI] 任务 {prompt_id} 完成")
+        else:
+            logger.error(f"[ComfyUI] 任务 {prompt_id} 等待结果超时或失败")
+
+        return result
+
+    async def wait_video_result(self, prompt_id: str, extra_timeout: int = 0) -> Optional[bytes]:
+        """等待并下载视频结果
+
+        SaveVideo 节点的输出格式类似图片，存储在 outputs[node]["videos"] 中，
+        每项包含 filename / subfolder / type 字段。
+        """
+        total_timeout = self.timeout + extra_timeout
+        async with aiohttp.ClientSession() as session:
+            for _ in range(total_timeout):
+                await asyncio.sleep(1)
+                try:
+                    async with session.get(f"{self.server_url}/history/{prompt_id}") as resp:
+                        if resp.status == 200:
+                            history = await resp.json()
+                            if prompt_id in history:
+                                outputs = history[prompt_id].get("outputs", {})
+                                for node_output in outputs.values():
+                                    # 兼容多种字段：videos / gifs / images（部分视频节点输出沿用 images 字段）
+                                    for key in ("videos", "gifs", "images"):
+                                        items = node_output.get(key)
+                                        if not items:
+                                            continue
+                                        for item in items:
+                                            filename = item.get("filename", "")
+                                            # 跳过纯图片输出
+                                            if key == "images" and not self._is_video_filename(filename):
+                                                continue
+                                            url = (
+                                                f"{self.server_url}/view?"
+                                                f"filename={filename}"
+                                                f"&subfolder={item.get('subfolder', '')}"
+                                                f"&type={item.get('type', 'output')}"
+                                            )
+                                            async with session.get(url) as v_resp:
+                                                if v_resp.status == 200:
+                                                    return await v_resp.read()
+                except (aiohttp.ClientError, asyncio.TimeoutError, KeyError):
+                    continue
+        return None
+
+    @staticmethod
+    def _is_video_filename(filename: str) -> bool:
+        if not filename:
+            return False
+        lower = filename.lower()
+        return any(lower.endswith(ext) for ext in (".mp4", ".webm", ".mov", ".mkv", ".avi", ".gif"))
+
     async def queue_and_wait_text(self, workflow: dict, output_node: str = "", max_wait: float = 300.0, on_wait_callback=None, on_submitted_callback=None) -> Optional[str]:
         """提交工作流并等待文本结果（带队列缓冲）
 

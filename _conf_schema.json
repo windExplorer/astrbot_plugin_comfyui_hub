@@ -215,5 +215,35 @@
     "type": "bool",
     "default": true,
     "hint": "图生图输出审查时是否使用Tagger获取图片标签并进行关键词审查（无LLM参与）"
+  },
+  "enable_img2video": {
+    "description": "启用图生视频功能",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后允许使用图生视频功能（需要图片+提示词）"
+  },
+  "img2video_workflow": {
+    "description": "图生视频工作流文件名",
+    "type": "string",
+    "default": "example_image2video.json",
+    "hint": "图生视频工作流文件名，文件需放在 plugin_data/astrbot_plugin_comfyui_hub/workflows/ 目录下"
+  },
+  "img2video_positive_node": {
+    "description": "图生视频正面提示词节点ID",
+    "type": "string",
+    "default": "3",
+    "hint": "图生视频工作流中正面提示词的节点编号"
+  },
+  "img2video_negative_node": {
+    "description": "图生视频负面提示词节点ID",
+    "type": "string",
+    "default": "4",
+    "hint": "图生视频工作流中负面提示词的节点编号"
+  },
+  "img2video_input_node": {
+    "description": "图生视频输入图片节点ID",
+    "type": "string",
+    "default": "2",
+    "hint": "图生视频工作流中 LoadImage 节点的编号"
   }
 }

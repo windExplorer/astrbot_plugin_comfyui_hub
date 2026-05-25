@@ -10,17 +10,16 @@ from PIL import Image as PILImage
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.message_components import Reply
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import UserMessageSegment, TextPart, ImageURLPart
 
 from .comfyui_api import ComfyUIAPI
 from .image_to_image import ImageToImage
 from .image_to_text import ImageToText
+from .image_to_video import ImageToVideo
 from .text_to_image import TextToImage
 
 
-@register("astrbot_plugin_comfyui_hub", "ChooseC", "为 AstrBot 提供 ComfyUI 调用能力的插件，计划支持 ComfyUI 全功能。",
-          "1.1.0", "https://github.com/ReallyChooseC/astrbot_plugin_comfyui_hub")
 class ComfyUIHub(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -118,6 +117,26 @@ class ComfyUIHub(Star):
                     config.get("img2img_positive_node", "20"),
                     config.get("img2img_negative_node", "21"),
                     input_nodes_list
+                )
+
+        # 初始化图生视频设置
+        self.img2video = None
+        if config.get("enable_img2video", True):
+            i2v_workflow_filename = config.get("img2video_workflow", "example_image2video.json")
+            i2v_workflow_path = workflow_dir / i2v_workflow_filename
+
+            if not i2v_workflow_path.exists():
+                example_path = plugin_dir / "example_image2video.json"
+                if example_path.exists():
+                    shutil.copy(example_path, i2v_workflow_path)
+
+            if i2v_workflow_path.exists():
+                self.img2video = ImageToVideo(
+                    self.api,
+                    str(i2v_workflow_path),
+                    config.get("img2video_positive_node", "3"),
+                    config.get("img2video_negative_node", "4"),
+                    config.get("img2video_input_node", "2")
                 )
 
         # 初始化审查设置
@@ -1214,3 +1233,134 @@ class ComfyUIHub(Star):
             event.stop_event()
         else:
             yield event.plain_result("生成失败")
+
+    @filter.command("img2video", alias={'图生视频', '生视频', 'i2v'})
+    async def img2video(self, event: AstrMessageEvent):
+        """图生视频指令，必须提供图片，提示词可选"""
+        if not self.img2video:
+            yield event.plain_result("⚠️ 图生视频功能未开启")
+            return
+
+        from astrbot.api.message_components import Image as ImageComponent, Reply as ReplyComponent, Video as VideoComponent
+
+        # 获取消息中的图片（取第一张）
+        chain = event.get_messages()
+        image_data = None
+        for msg in chain:
+            if isinstance(msg, ReplyComponent) and msg.chain:
+                for chain_msg in msg.chain:
+                    if isinstance(chain_msg, ImageComponent):
+                        image_data = await self._get_image_data(chain_msg)
+                        if image_data:
+                            break
+            elif isinstance(msg, ImageComponent):
+                image_data = await self._get_image_data(msg)
+            if image_data:
+                break
+
+        # 解析提示词
+        text = event.message_str.strip()
+        for cmd in ['img2video', '图生视频', '生视频', 'i2v']:
+            pattern = rf'^[\s/#]?{re.escape(cmd)}\s+'
+            match = re.match(pattern, text, re.IGNORECASE)
+            if match:
+                text = text[match.end():]
+                break
+            if re.match(rf'^[\s/#]?{re.escape(cmd)}$', text, re.IGNORECASE):
+                text = ""
+                break
+
+        params = self._parse_params(text)
+        positive, negative, chain_param, _, _, _ = params
+
+        # 图片必填，提示词可选
+        if not image_data:
+            yield event.plain_result("⚠️ 图生视频需要提供图片")
+            return
+
+        logger.info(f"[图生视频] 已接收图片 {len(image_data)} 字节，提示词: {positive or '(空)'}")
+
+        # 输入图片审查（复用图生图的审查逻辑）
+        is_safe, message = await self._check_img2img_input_censorship(event, image_data)
+        if not is_safe:
+            yield event.plain_result(message)
+            return
+
+        # 输入文本审查
+        user_id = event.get_sender_id()
+        current_time = time.time()
+
+        if user_id in self.blocked_users:
+            expire_time = self.blocked_users[user_id]
+            if current_time < expire_time:
+                remaining = int(expire_time - current_time)
+                yield event.plain_result(f"由于触发违规词，您已被禁止使用绘图功能。剩余时间: {remaining} 秒。")
+                return
+            else:
+                del self.blocked_users[user_id]
+                self._save_block_data()
+
+        group_id = event.get_group_id()
+        is_censorship_enabled = group_id and group_id in self.censored_groups
+        is_admin = event.is_admin()
+        should_bypass_censorship = is_admin and self.admin_bypass_censorship
+
+        if is_censorship_enabled and not should_bypass_censorship and self.enable_input_censorship:
+            for tag in self.block_tags:
+                if tag.lower() in positive.lower():
+                    self.blocked_users[user_id] = current_time + 120
+                    self._save_block_data()
+                    yield event.plain_result(f"⚠️ 违规：检测到敏感词 '{tag}'。您将被禁服务 2 分钟。")
+                    return
+
+            if self.input_censorship_use_llm:
+                is_safe, reason = await self._check_safety_with_llm(event, positive)
+                if not is_safe:
+                    self.blocked_users[user_id] = current_time + 120
+                    self._save_block_data()
+                    yield event.plain_result(f"⚠️ 您的请求包含敏感内容，已被AI审查系统拒绝。您将被禁服务 2 分钟。")
+                    return
+
+            if "sfw" not in positive.lower() and "safe" not in positive.lower():
+                positive += ", sfw, safe for work"
+
+        async def on_queue_wait(running_count: int, pending_count: int, waited: float):
+            await self._send_text_message(
+                event,
+                f"仍在排队等待中...（前面还有 {pending_count} 个任务）"
+            )
+
+        async def on_submitted(prompt_id: str, queue_position: int, tasks_ahead: int):
+            if queue_position > 0:
+                await self._send_text_message(
+                    event,
+                    f"已提交，队列第 {queue_position} 位（前方 {tasks_ahead} 个任务）"
+                )
+            else:
+                await self._send_text_message(event, "正在生成视频...")
+
+        video_data = await self.img2video.generate(
+            image_data, positive, negative,
+            on_wait_callback=on_queue_wait,
+            on_submitted_callback=on_submitted
+        )
+
+        if not video_data:
+            yield event.plain_result("生成失败")
+            return
+
+        temp_file = self.temp_dir / f"{int(time.time())}.mp4"
+        with open(temp_file, "wb") as f:
+            f.write(video_data)
+
+        if event.get_platform_name() == "aiocqhttp":
+            try:
+                await self._call_send_api(event, f"[CQ:video,file=file://{temp_file}]")
+            except Exception as e:
+                logger.error(f"[图生视频] 视频发送失败: {e}")
+                yield event.plain_result(f"⚠️ 视频已生成但发送失败: {e}")
+                return
+        else:
+            yield event.chain_result([VideoComponent.fromFileSystem(str(temp_file))])
+
+        event.stop_event()
