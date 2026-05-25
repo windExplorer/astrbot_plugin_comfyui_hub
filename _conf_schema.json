@@ -245,5 +245,53 @@
     "type": "string",
     "default": "2",
     "hint": "图生视频工作流中 LoadImage 节点的编号"
+  },
+  "img2video_resolution_node": {
+    "description": "图生视频分辨率节点ID",
+    "type": "string",
+    "default": "1",
+    "hint": "用于设置输出分辨率的节点编号（通常是 WanImageToVideo 节点），插件会按输入图比例计算并写入"
+  },
+  "img2video_resolution_width_field": {
+    "description": "分辨率节点宽度字段名",
+    "type": "string",
+    "default": "width",
+    "hint": "分辨率节点中宽度参数的字段名"
+  },
+  "img2video_resolution_height_field": {
+    "description": "分辨率节点高度字段名",
+    "type": "string",
+    "default": "height",
+    "hint": "分辨率节点中高度参数的字段名"
+  },
+  "img2video_fps_node": {
+    "description": "图生视频帧率节点ID",
+    "type": "string",
+    "default": "18",
+    "hint": "用于设置帧率（fps）的节点编号，留空则不修改"
+  },
+  "img2video_fps_field": {
+    "description": "帧率节点字段名",
+    "type": "string",
+    "default": "value",
+    "hint": "帧率节点中数值字段的字段名"
+  },
+  "img2video_length_node": {
+    "description": "图生视频长度节点ID",
+    "type": "string",
+    "default": "20",
+    "hint": "用于设置视频长度（秒）的节点编号，留空则不修改"
+  },
+  "img2video_length_field": {
+    "description": "长度节点字段名",
+    "type": "string",
+    "default": "value",
+    "hint": "长度节点中数值字段的字段名"
+  },
+  "img2video_max_fps": {
+    "description": "最大帧率",
+    "type": "int",
+    "default": 24,
+    "hint": "用户在提示词中指定 fps 时的上限"
   }
 }

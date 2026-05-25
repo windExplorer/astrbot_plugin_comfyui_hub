@@ -1,4 +1,5 @@
 import json
+import math
 import random
 import time
 from io import BytesIO
@@ -11,14 +12,30 @@ from .comfyui_api import ComfyUIAPI
 
 
 class ImageToVideo:
+    MAX_OUTPUT_PIXELS = 1024 * 1024
+
     def __init__(self, api: ComfyUIAPI, workflow_path: str,
                  positive_node: str = "3", negative_node: str = "4",
-                 input_node: str = "2"):
+                 input_node: str = "2",
+                 resolution_node: str = "1",
+                 resolution_width_field: str = "width",
+                 resolution_height_field: str = "height",
+                 fps_node: str = "18", fps_field: str = "value",
+                 length_node: str = "20", length_field: str = "value",
+                 max_fps: int = 24):
         self.api = api
         self.workflow = self._load_workflow(workflow_path)
         self.positive_node = positive_node
         self.negative_node = negative_node
         self.input_node = input_node
+        self.resolution_node = resolution_node
+        self.resolution_width_field = resolution_width_field
+        self.resolution_height_field = resolution_height_field
+        self.fps_node = fps_node
+        self.fps_field = fps_field
+        self.length_node = length_node
+        self.length_field = length_field
+        self.max_fps = max_fps
 
     @staticmethod
     def _load_workflow(path: str) -> dict:
@@ -55,15 +72,51 @@ class ImageToVideo:
             logger.error(f"[ComfyUI] 动图检测/处理失败: {e}")
             return None
 
+    def _calc_output_size(self, image_data: bytes) -> Optional[tuple]:
+        """根据输入图像计算输出分辨率
+
+        - 输入图像像素 ≤ 1M：直接使用原始尺寸
+        - 输入图像像素 > 1M：保持比例缩放至 1M 像素以内
+        - 宽高对齐到 16 的倍数（视频模型常见约束）
+
+        注意：仅计算并写入工作流的输出分辨率，不修改输入图像本身。
+
+        Returns:
+            (width, height) 或 None（解析失败）
+        """
+        try:
+            with PILImage.open(BytesIO(image_data)) as img:
+                w, h = img.size
+        except Exception as e:
+            logger.error(f"[ComfyUI] 读取图像尺寸失败: {e}")
+            return None
+
+        if w <= 0 or h <= 0:
+            return None
+
+        pixels = w * h
+        if pixels > self.MAX_OUTPUT_PIXELS:
+            scale = math.sqrt(self.MAX_OUTPUT_PIXELS / pixels)
+            w = int(w * scale)
+            h = int(h * scale)
+
+        align = 16
+        w = max(align, (w // align) * align)
+        h = max(align, (h // align) * align)
+        return w, h
+
     async def generate(self, image_data: bytes, prompt: str, negative: str = "",
+                       fps: Optional[float] = None, length: Optional[float] = None,
                        max_wait: float = 300.0, on_wait_callback=None,
                        on_submitted_callback=None) -> Optional[bytes]:
         """生成视频
 
         Args:
             image_data: 输入图片数据
-            prompt: 正面提示词
+            prompt: 正面提示词（可为空字符串）
             negative: 负面提示词
+            fps: 帧率，None 表示沿用工作流默认值；将被钳制到 [1, max_fps]
+            length: 视频长度（秒），None 表示沿用工作流默认值
         """
         workflow = json.loads(json.dumps(self.workflow))
 
@@ -72,6 +125,9 @@ class ImageToVideo:
         if processed is None:
             logger.error("[ComfyUI] 输入图片处理失败")
             return None
+
+        # 根据输入图像计算输出分辨率
+        size = self._calc_output_size(processed)
 
         filename = f"i2v_input_{int(time.time() * 1000)}_{random.randint(1000, 9999)}.png"
         try:
@@ -98,6 +154,30 @@ class ImageToVideo:
         if not load_image_set:
             logger.error("[ComfyUI] 工作流中未找到 LoadImage 节点")
             return None
+
+        # 写入分辨率
+        if size and self.resolution_node and self.resolution_node in workflow:
+            res_node = workflow[self.resolution_node]
+            if isinstance(res_node, dict) and "inputs" in res_node:
+                res_node["inputs"][self.resolution_width_field] = size[0]
+                res_node["inputs"][self.resolution_height_field] = size[1]
+                logger.info(f"[ComfyUI] 输出分辨率: {size[0]}x{size[1]}")
+
+        # 写入 fps（钳制范围）
+        if fps is not None and self.fps_node and self.fps_node in workflow:
+            clamped_fps = max(1, min(int(round(fps)), self.max_fps))
+            fps_node_data = workflow[self.fps_node]
+            if isinstance(fps_node_data, dict) and "inputs" in fps_node_data:
+                fps_node_data["inputs"][self.fps_field] = clamped_fps
+                logger.info(f"[ComfyUI] 帧率: {clamped_fps}")
+
+        # 写入视频长度（秒）
+        if length is not None and self.length_node and self.length_node in workflow:
+            clamped_length = max(0.1, float(length))
+            len_node_data = workflow[self.length_node]
+            if isinstance(len_node_data, dict) and "inputs" in len_node_data:
+                len_node_data["inputs"][self.length_field] = clamped_length
+                logger.info(f"[ComfyUI] 视频长度: {clamped_length}s")
 
         # 设置正面提示词
         pos_node = workflow.get(self.positive_node)

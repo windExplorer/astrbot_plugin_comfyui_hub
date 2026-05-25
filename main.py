@@ -136,7 +136,15 @@ class ComfyUIHub(Star):
                     str(i2v_workflow_path),
                     config.get("img2video_positive_node", "3"),
                     config.get("img2video_negative_node", "4"),
-                    config.get("img2video_input_node", "2")
+                    config.get("img2video_input_node", "2"),
+                    config.get("img2video_resolution_node", "1"),
+                    config.get("img2video_resolution_width_field", "width"),
+                    config.get("img2video_resolution_height_field", "height"),
+                    config.get("img2video_fps_node", "18"),
+                    config.get("img2video_fps_field", "value"),
+                    config.get("img2video_length_node", "20"),
+                    config.get("img2video_length_field", "value"),
+                    int(config.get("img2video_max_fps", 24)),
                 )
 
         # 初始化审查设置
@@ -1273,12 +1281,28 @@ class ComfyUIHub(Star):
         params = self._parse_params(text)
         positive, negative, chain_param, _, _, _ = params
 
+        # 从 positive 中再额外提取 fps / length 参数
+        fps_value = None
+        length_value = None
+        if positive:
+            fps_pattern = r'(?:\s+|^)(?:fps|帧率)\s*[:=]?\s*(\d+(?:\.\d+)?)'
+            m = re.search(fps_pattern, positive, re.IGNORECASE)
+            if m:
+                fps_value = float(m.group(1))
+                positive = re.sub(fps_pattern, '', positive, flags=re.IGNORECASE).strip()
+
+            length_pattern = r'(?:\s+|^)(?:length|len|时长|长度|秒)\s*[:=]?\s*(\d+(?:\.\d+)?)'
+            m = re.search(length_pattern, positive, re.IGNORECASE)
+            if m:
+                length_value = float(m.group(1))
+                positive = re.sub(length_pattern, '', positive, flags=re.IGNORECASE).strip()
+
         # 图片必填，提示词可选
         if not image_data:
             yield event.plain_result("⚠️ 图生视频需要提供图片")
             return
 
-        logger.info(f"[图生视频] 已接收图片 {len(image_data)} 字节，提示词: {positive or '(空)'}")
+        logger.info(f"[图生视频] 已接收图片 {len(image_data)} 字节，提示词: {positive or '(空)'}, fps={fps_value}, length={length_value}")
 
         # 输入图片审查（复用图生图的审查逻辑）
         is_safe, message = await self._check_img2img_input_censorship(event, image_data)
@@ -1341,6 +1365,7 @@ class ComfyUIHub(Star):
 
         video_data = await self.img2video.generate(
             image_data, positive, negative,
+            fps=fps_value, length=length_value,
             on_wait_callback=on_queue_wait,
             on_submitted_callback=on_submitted
         )
