@@ -1035,10 +1035,6 @@ class ComfyUIHub(Star):
     @filter.command("delete", alias={'撤回', 'recall'})
     async def delete_msg(self, event: AstrMessageEvent):
         """引用撤回绘图功能输出的消息"""
-        passed, _ = self._check_whitelist(event)
-        if not passed:
-            return
-
         chain = event.get_messages()
         if not chain:
             return
@@ -1055,39 +1051,40 @@ class ComfyUIHub(Star):
             yield event.plain_result("❌ 请引用要撤回的绘图消息")
             return
 
+        target_msg_id = str(first_seg.id)
         group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
         current_time = time.time()
         is_admin = event.is_admin()
 
+        cache_key = str(group_id) if group_id else str(sender_id) if sender_id else None
         is_valid_message = is_admin
-        msg_index_to_remove = None
+        matched_record = None
 
-        if not is_admin and group_id:
-            group_id_str = str(group_id)
-            sent_msgs = self.sent_messages.get(group_id_str, [])
+        if not is_admin and cache_key:
+            sent_msgs = self.sent_messages.get(cache_key, [])
             valid_msgs = []
-            for i, msg_data in enumerate(sent_msgs):
+            for msg_data in sent_msgs:
                 if not isinstance(msg_data, dict):
                     continue
-                msg_id = msg_data.get('message_id')
-                msg_timestamp = msg_data.get('timestamp', 0)
-                if current_time - msg_timestamp > self.message_cache_ttl:
+                if current_time - msg_data.get('timestamp', 0) > self.message_cache_ttl:
                     continue
-                if msg_id == str(first_seg.id):
-                    is_valid_message = True
-                    msg_index_to_remove = i
                 valid_msgs.append(msg_data)
-            self.sent_messages[group_id_str] = valid_msgs
+                if msg_data.get('message_id') == target_msg_id:
+                    is_valid_message = True
+                    matched_record = msg_data
+            self.sent_messages[cache_key] = valid_msgs
 
         if not is_valid_message:
             return
 
         try:
-            client = event.bot
-            await client.delete_msg(message_id=int(first_seg.id))
-            if is_valid_message and group_id and msg_index_to_remove is not None:
-                group_id_str = str(group_id)
-                self.sent_messages[group_id_str].pop(msg_index_to_remove)
+            await event.bot.delete_msg(message_id=int(target_msg_id))
+            if matched_record is not None and cache_key:
+                try:
+                    self.sent_messages[cache_key].remove(matched_record)
+                except ValueError:
+                    pass
                 self._save_sent_messages()
             event.stop_event()
         except Exception as e:
