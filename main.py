@@ -83,7 +83,7 @@ class ComfyUIHub(Star):
 
         plugin_dir = Path(__file__).parent
         data_root = plugin_dir.parent.parent / "plugin_data"
-        data_dir = data_root / "astrbot_plugin_comfyui_hub"
+        data_dir = data_root / "astrbot_plugin_comfyui_hub_fork"
         data_dir.mkdir(parents=True, exist_ok=True)
 
         workflow_dir = data_dir / "workflows"
@@ -340,8 +340,22 @@ class ComfyUIHub(Star):
         return self._extract_and_record_message(result, event)
 
     async def _send_image_message(self, event: AstrMessageEvent, image_file: Path, chain: bool = False) -> Optional[str]:
-        """发送图片消息并记录消息ID"""
+        """发送图片消息并记录消息ID
+
+        bot 客户端（napcat / go-cqhttp / Lagrange 等）在自己的文件系统里查找
+        ``file://`` 指向的本地路径。bot 客户端与 AstrBot 不在同一台机器 / 不同
+        容器时，绝对路径在 bot 进程里根本不存在，会触发 retcode=1200 "路径不存在"。
+        因此统一把本地图片读出后用 ``base64://`` 协议头发送，让 bot 客户端直接吃
+        图片数据，不再依赖共享文件系统。
+        """
         group_id = event.get_group_id()
+
+        try:
+            image_b64 = base64.b64encode(image_file.read_bytes()).decode("ascii")
+        except Exception as e:
+            logger.error(f"读取图片文件失败: {e}")
+            return None
+        image_payload = f"base64://{image_b64}"
 
         if group_id and chain:
             try:
@@ -351,7 +365,7 @@ class ComfyUIHub(Star):
                         "user_id": int(event.get_sender_id()),
                         "nickname": "ComfyUI",
                         "content": [
-                            {"type": "image", "data": {"file": f"file://{image_file}"}}
+                            {"type": "image", "data": {"file": image_payload}}
                         ],
                     },
                 }]
@@ -362,9 +376,9 @@ class ComfyUIHub(Star):
                 )
             except Exception as e:
                 logger.error(f"合并转发发送失败: {e}")
-                result = await self._call_send_api(event, f"[CQ:image,file=file://{image_file}]")
+                result = await self._call_send_api(event, f"[CQ:image,file={image_payload}]")
         else:
-            result = await self._call_send_api(event, f"[CQ:image,file=file://{image_file}]")
+            result = await self._call_send_api(event, f"[CQ:image,file={image_payload}]")
 
         return self._extract_and_record_message(result, event)
 
@@ -1279,7 +1293,19 @@ class ComfyUIHub(Star):
 
         if event.get_platform_name() == "aiocqhttp":
             try:
-                await self._call_send_api(event, f"[CQ:video,file=file://{temp_file}]")
+                # 走 base64 协议头发送，避免 bot 客户端在自己文件系统里找不到 AstrBot 进程下的 temp 路径
+                # 视频通常较大，OneBot 协议单消息段上限约 30MB，超出则拒绝发送
+                video_bytes = temp_file.read_bytes()
+                max_size = 30 * 1024 * 1024
+                if len(video_bytes) > max_size:
+                    size_mb = len(video_bytes) / (1024 * 1024)
+                    logger.error(f"[图生视频] 视频过大 ({size_mb:.1f}MB)，超过 OneBot 单消息段上限 {max_size // (1024*1024)}MB")
+                    yield event.plain_result(
+                        f"⚠️ 视频过大 ({size_mb:.1f}MB)，无法通过 base64 发送。请降低 fps 或时长后再试。"
+                    )
+                    return
+                video_b64 = base64.b64encode(video_bytes).decode("ascii")
+                await self._call_send_api(event, f"[CQ:video,file=base64://{video_b64}]")
             except Exception as e:
                 logger.error(f"[图生视频] 视频发送失败: {e}")
                 yield event.plain_result(f"⚠️ 视频已生成但发送失败: {e}")

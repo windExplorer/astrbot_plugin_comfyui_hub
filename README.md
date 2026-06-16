@@ -1,3 +1,5 @@
+> 📌 **Fork 来源声明**：本仓库 fork 自 [ChooseC/astrbot_plugin_comfyui_hub](https://github.com/ReallyChooseC/astrbot_plugin_comfyui_hub)，原作者 **ChooseC**。本仓库仅在此基础上做本地化定制与功能调整，上游协议以原仓库为准。
+
 # AstrBot ComfyUI Hub 插件
 
 为 AstrBot 提供 ComfyUI 调用能力的插件，支持文生图、图生图、图生视频、图片标签识别。
