@@ -25,7 +25,7 @@
 
 ## 工作流文件
 
-工作流文件位置：`data/plugin_data/astrbot_plugin_comfyui_hub/workflows/`
+工作流文件位置：`data/plugin_data/astrbot_plugin_comfyui_hub_fork/workflows/`
 
 首次启动时，如果配置指定的工作流文件不存在，插件会自动从插件目录复制示例工作流（`example_text2img.json`、`example_img2img.json`、`example_image2video.json`、`example_tagger.json`）。
 
@@ -124,3 +124,28 @@
 - 用户输入图片大小上限 20 MB；输出图片在 Discord/Telegram 平台自动压缩到 10 MB 以内（先 WebP 90，再 AVIF 85，再降低 WebP 质量）
 - 输入审查命中后，用户被禁服务 2 分钟
 - 输出审查命中后，图片不会发送，用户不会被禁
+
+## 已知问题修复
+
+### ✅ `retcode=1200` "路径不存在"（v0.1.0-fork 已修复）
+
+**症状**：图片生成成功，但 AstrBot 日志报错
+
+```
+<ActionFailed status='failed', retcode=1200, data=None, message='路径不存在', ...>
+```
+
+聊天窗口里看不到生成的图片。
+
+**根因**：bot 客户端（napcat / go-cqhttp / Lagrange 等）跑在自己的进程里，看到 `file://xxx` 协议头后会**在自己的文件系统上找这个路径**。
+
+- 当 bot 客户端与 AstrBot **不在同一台机器 / 不同容器**时（即使有共享卷挂载），bot 进程根本看不到 AstrBot 进程所在机器的绝对路径 → 报 1200。
+- 在 Windows 上 `f"file://{image_file}"` 拼出 `file://D:\...` 这种带盘符和反斜杠的 URL，go-cqhttp / napcat 解析也会失败。
+
+**修复（v0.1.0-fork）**：统一改用 `base64://` 协议头发送图片与视频——bot 客户端直接吃图片数据，**不再依赖共享文件系统**。
+
+- 涉及改动：[`_send_image_message`](main.py) 与 [`cmd_img2video`](main.py)（图片 3 处 + 视频 1 处 CQ 码）
+- 视频超过 30 MB（OneBot 单消息段上限）时拒绝发送并提示用户降 fps / 时长，避免触发协议级错误
+- 不影响非 aiocqhttp 平台（Discord / Telegram 等仍走 `event.image_result` 由 AstrBot 框架处理）
+
+**验证**：升级后在群里跑 `/draw 测试` 即可看到图片；若仍出现 1200，请检查 bot 客户端版本是否过旧（建议 napcat ≥ 2.0 / go-cqhttp ≥ 1.1）。
